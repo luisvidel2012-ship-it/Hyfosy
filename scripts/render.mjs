@@ -5,6 +5,8 @@
 //   node scripts/render.mjs --text-only     → solo subtítulos (.srt) y guion (.md)
 //   node scripts/render.mjs --stills DIR    → una imagen PNG por escena (revisión rápida)
 //   Opciones: --fps 30  --out video/hyfosy.webm  --bitrate 1500k
+//             --page video/hyfosy-reel.html --width 1080 --height 1920   (para el reel vertical)
+//             --guion guion/guion-hyfosy.md  --guion-title "..."
 //
 // Requiere Playwright (Chromium) y un ffmpeg con codificador VP8 (sirve el que trae Playwright).
 import { createRequire } from 'node:module';
@@ -20,7 +22,12 @@ const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[
 const flag = name => args.includes(name);
 
 const FPS = Number(opt('--fps', 30));
-const OUT = resolve(ROOT, opt('--out', 'video/hyfosy.webm'));
+const PAGE = opt('--page', 'video/hyfosy.html');
+const OUT = resolve(ROOT, opt('--out', PAGE.replace(/\.html$/, '.webm')));
+const GUION = resolve(ROOT, opt('--guion', 'guion/guion-hyfosy.md'));
+const GUION_TITLE = opt('--guion-title', 'Guion — Video instructivo HyFoSy');
+const VIEW_W = Number(opt('--width', 1280));
+const VIEW_H = Number(opt('--height', 720));
 const BITRATE = opt('--bitrate', '1500k');
 const STILLS = opt('--stills', null);
 
@@ -60,9 +67,9 @@ function writeSrt(meta, file) {
 
 function writeGuion(meta, file) {
   const words = meta.scenes.reduce((a, s) => a + s.lines.reduce((b, l) => b + l.text.split(/\s+/).length, 0), 0);
-  let md = `# Guion — Video instructivo HyFoSy
+  let md = `# ${GUION_TITLE}
 
-> Archivo generado automáticamente por \`scripts/render.mjs\` a partir de \`video/hyfosy.html\`.
+> Archivo generado automáticamente por \`scripts/render.mjs\` a partir de \`${PAGE}\`.
 > Para cambiar el texto o los tiempos, edite las escenas en el HTML y vuelva a ejecutar el script.
 
 | | |
@@ -71,7 +78,7 @@ function writeGuion(meta, file) {
 | **Objetivo** | Que la paciente entienda qué es el examen, para qué sirve, cómo prepararse, qué sentirá y qué hacer después. |
 | **Público** | Pacientes en estudio de fertilidad y sus parejas (lenguaje claro, trato de «usted»). |
 | **Duración** | ${mmss(meta.TOTAL)} (${meta.scenes.length} escenas, ${words} palabras de narración) |
-| **Formato** | 1280 × 720, ${FPS} fps, subtítulos incrustados + archivo .srt para locución o plataformas de video |
+| **Formato** | ${VIEW_W} × ${VIEW_H}, ${FPS} fps, subtítulos incrustados + archivo .srt para locución o plataformas de video |
 
 ## Escenas
 
@@ -101,17 +108,17 @@ function writeGuion(meta, file) {
 
 const { chromium } = loadPlaywright();
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
+const page = await browser.newPage({ viewport: { width: VIEW_W, height: VIEW_H }, deviceScaleFactor: 1 });
 page.on('pageerror', e => { console.error('Error en la página:', e); process.exitCode = 1; });
-await page.goto(pathToFileURL(join(ROOT, 'video/hyfosy.html')).href + '?render=1');
+await page.goto(pathToFileURL(join(ROOT, PAGE)).href + '?render=1');
 await page.evaluate(() => document.fonts.ready);
 await page.evaluate(() => window.HYFOSY.ready);
 const meta = await page.evaluate(() => ({ TOTAL: window.HYFOSY.TOTAL, scenes: window.HYFOSY.scenes }));
 console.log(`Duración: ${mmss(meta.TOTAL)} · ${meta.scenes.length} escenas`);
 
-mkdirSync(join(ROOT, 'guion'), { recursive: true });
+mkdirSync(dirname(GUION), { recursive: true });
 writeSrt(meta, OUT.replace(/\.[^.]+$/, '.srt'));
-writeGuion(meta, join(ROOT, 'guion/guion-hyfosy.md'));
+writeGuion(meta, GUION);
 console.log('Subtítulos y guion actualizados.');
 
 if (STILLS) {
