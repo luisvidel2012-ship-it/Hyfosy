@@ -1,0 +1,1118 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HyFoSy · Video instructivo</title>
+<style>
+  :root { --bg:#10181f; --panel:#18232c; --line:#2a3a46; --ink:#e8eef2; --muted:#9fb0bc; --accent:#2bb3b1; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:"Segoe UI",Roboto,"Helvetica Neue","Liberation Sans",Arial,sans-serif; }
+  main { width:min(1280px,100%); margin:0 auto; padding:16px; }
+  h1 { font-size:17px; font-weight:600; margin:4px 0 12px; color:var(--muted); }
+  .stage { width:100%; aspect-ratio:16/9; background:#000; border-radius:10px; overflow:hidden; }
+  canvas { width:100%; height:100%; display:block; }
+  .controls { display:flex; gap:10px; align-items:center; margin-top:10px; }
+  button { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font:inherit; font-size:14px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button[aria-pressed="false"] { opacity:.55; }
+  input[type=range] { flex:1; min-width:0; accent-color:var(--accent); }
+  .time { font-variant-numeric:tabular-nums; color:var(--muted); font-size:14px; white-space:nowrap; }
+  .chapters { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+  .chapters button { font-size:13px; padding:5px 9px; }
+  .chapters button.on { border-color:var(--accent); color:var(--accent); }
+  body.render main { padding:0; width:1280px; }
+  body.render h1, body.render .controls, body.render .chapters { display:none; }
+  body.render .stage { border-radius:0; width:1280px; height:720px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>HyFoSy — Histerosalpingo-sonografía con espuma · Video instructivo para pacientes</h1>
+  <div class="stage"><canvas id="cv" width="1280" height="720"></canvas></div>
+  <div class="controls">
+    <button id="play" title="Reproducir / pausar (barra espaciadora)">▶ Reproducir</button>
+    <input id="seek" type="range" min="0" step="0.01" value="0" aria-label="Posición del video">
+    <span class="time" id="time">0:00 / 0:00</span>
+    <button id="cc" aria-pressed="true" title="Subtítulos (tecla C)">CC</button>
+    <button id="fs" title="Pantalla completa (tecla F)">⛶</button>
+  </div>
+  <div class="chapters" id="chapters"></div>
+</main>
+<script>
+'use strict';
+// ─────────────────────────────────────────────────────────────────────────────
+// Motor: todo se dibuja en función del tiempo t (segundos), sin estado.
+// Así el mismo código sirve para reproducir en vivo y para exportar cuadro a cuadro.
+// ─────────────────────────────────────────────────────────────────────────────
+const W = 1280, H = 720;
+const RENDER = new URLSearchParams(location.search).has('render');
+const FONT = '"Segoe UI", Roboto, "Helvetica Neue", "Liberation Sans", Arial, sans-serif';
+const EMOJI = '"Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
+const C = {
+  bg:'#FBF6F2', bg2:'#F3ECE6', ink:'#23303B', muted:'#5C6B77', teal:'#127A80', tealSoft:'#D6EEEE',
+  rose:'#EBA0B2', roseDeep:'#C2476A', roseWall:'#F6C3CF', cavity:'#9E2F52', vagina:'#F2C7C2',
+  ovary:'#F5D2B0', ovaryStroke:'#C98B5C', ok:'#2E8B57', warn:'#D98A12', bad:'#C8323B',
+  foamEdge:'#7FB9DF', gold:'#E0A526', card:'#FFFFFF', line:'#E3D9D2',
+};
+
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = x => { x = clamp(x); return x * x * (3 - 2 * x); };
+const easeOut = x => { x = clamp(x); return 1 - Math.pow(1 - x, 3); };
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+function rng(seed) {
+  return () => {
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+const cv = document.getElementById('cv');
+const X = cv.getContext('2d');
+
+// ── Texto ────────────────────────────────────────────────────────────────────
+const font = (size, weight = 400) => `${weight} ${size}px ${FONT}`;
+function text(s, x, y, o = {}) {
+  X.save();
+  X.font = font(o.size || 24, o.weight || 400);
+  X.fillStyle = o.color || C.ink;
+  X.textAlign = o.align || 'left';
+  X.textBaseline = o.base || 'alphabetic';
+  if (o.alpha != null) X.globalAlpha *= o.alpha;
+  X.fillText(s, x, y);
+  X.restore();
+}
+function wrap(s, maxW, size, weight = 400) {
+  X.save();
+  X.font = font(size, weight);
+  const lines = [];
+  let cur = '';
+  for (const w of s.split(' ')) {
+    const test = cur ? cur + ' ' + w : w;
+    if (X.measureText(test).width > maxW && cur) { lines.push(cur); cur = w; } else cur = test;
+  }
+  if (cur) lines.push(cur);
+  X.restore();
+  return lines;
+}
+function para(s, x, y, maxW, o = {}) {
+  const size = o.size || 24, lh = o.lh || size * 1.32;
+  const lines = wrap(s, maxW, size, o.weight || 400);
+  lines.forEach((l, i) => text(l, x, y + i * lh, o));
+  return lines.length * lh;
+}
+function textWidth(s, size, weight = 400) {
+  X.save(); X.font = font(size, weight); const w = X.measureText(s).width; X.restore(); return w;
+}
+function emoji(e, x, y, size, alpha = 1) {
+  X.save();
+  X.globalAlpha *= alpha;
+  X.font = `${size}px ${EMOJI}`;
+  X.textAlign = 'center';
+  X.textBaseline = 'middle';
+  X.fillText(e, x, y);
+  X.restore();
+}
+function rrect(x, y, w, h, r) { X.beginPath(); X.roundRect(x, y, w, h, r); }
+function card(x, y, w, h, o = {}) {
+  X.save();
+  if (o.alpha != null) X.globalAlpha *= o.alpha;
+  X.shadowColor = 'rgba(60,40,30,0.12)'; X.shadowBlur = 18; X.shadowOffsetY = 6;
+  rrect(x, y, w, h, o.r || 16);
+  X.fillStyle = o.fill || C.card; X.fill();
+  X.shadowColor = 'transparent';
+  if (o.stroke) { X.lineWidth = o.lw || 2; X.strokeStyle = o.stroke; X.stroke(); }
+  X.restore();
+}
+function bullet(e, s, x, y, maxW, a, o = {}) {
+  if (a <= 0) return 0;
+  X.save();
+  X.globalAlpha *= a;
+  X.translate((1 - a) * 24, 0);
+  emoji(e, x + 20, y - 8, o.esize || 30);
+  const h = para(s, x + 52, y, maxW - 52, { size: o.size || 24, weight: o.weight || 400, color: o.color || C.ink });
+  X.restore();
+  return h;
+}
+function title(s, x, y, a, o = {}) {
+  text(s, x, y, { size: o.size || 40, weight: 700, color: o.color || C.ink, alpha: a, align: o.align || 'left' });
+}
+
+// ── Geometría del aparato reproductor (vista frontal, coordenadas locales) ──
+const TUBE_CP = [[70,-80],[112,-92],[170,-120],[236,-124],[292,-102],[326,-58],[324,-8],[302,24]];
+// Curva suave (Catmull-Rom) que pasa por los puntos de control.
+function catmull(P, n) {
+  const p = [];
+  for (let i = 0; i < P.length - 1; i++) {
+    const p0 = P[Math.max(0, i - 1)], p1 = P[i], p2 = P[i + 1], p3 = P[Math.min(P.length - 1, i + 2)];
+    for (let j = 0; j < n; j++) {
+      const t = j / n, t2 = t * t, t3 = t2 * t;
+      const f = k => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3);
+      p.push([f(0), f(1)]);
+    }
+  }
+  p.push(P[P.length - 1]);
+  return p;
+}
+const TUBE = (() => {
+  const p = catmull(TUBE_CP, 16);
+  const L = [0];
+  for (let i = 1; i < p.length; i++) L.push(L[i - 1] + Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]));
+  const tot = L[L.length - 1];
+  return { p, u: L.map(l => l / tot) };
+})();
+function tubeAt(u) {
+  u = clamp(u);
+  const { p, u: U } = TUBE;
+  let i = 1;
+  while (i < U.length - 1 && U[i] < u) i++;
+  const k = (u - U[i - 1]) / ((U[i] - U[i - 1]) || 1);
+  return [lerp(p[i - 1][0], p[i][0], k), lerp(p[i - 1][1], p[i][1], k)];
+}
+const tubeW = u => (u < 0.12 ? 6 : lerp(7, 17, ease((u - 0.2) / 0.6)));
+function strokeTube(side, u0, u1, wf, color) {
+  if (u1 <= u0) return;
+  const { p, u: U } = TUBE;
+  X.strokeStyle = color; X.lineCap = 'round';
+  for (let i = 1; i < p.length; i++) {
+    if (U[i] < u0 || U[i - 1] > u1) continue;
+    const a = U[i - 1] < u0 ? tubeAt(u0) : p[i - 1];
+    const b = U[i] > u1 ? tubeAt(u1) : p[i];
+    X.lineWidth = wf((U[i - 1] + U[i]) / 2);
+    X.beginPath(); X.moveTo(side * a[0], a[1]); X.lineTo(side * b[0], b[1]); X.stroke();
+  }
+}
+function bodyPath() {
+  X.beginPath();
+  X.moveTo(-42, 175);
+  X.bezierCurveTo(-46, 130, -60, 90, -78, 50);
+  X.bezierCurveTo(-110, -10, -125, -70, -108, -100);
+  X.bezierCurveTo(-90, -135, -40, -140, 0, -138);
+  X.bezierCurveTo(40, -140, 90, -135, 108, -100);
+  X.bezierCurveTo(125, -70, 110, -10, 78, 50);
+  X.bezierCurveTo(60, 90, 46, 130, 42, 175);
+  X.closePath();
+}
+function cavityPath() {
+  X.beginPath();
+  X.moveTo(-72, -80);
+  X.quadraticCurveTo(0, -62, 72, -80);
+  X.quadraticCurveTo(34, -5, 7, 72);
+  X.lineTo(5, 172); X.lineTo(-5, 172); X.lineTo(-7, 72);
+  X.quadraticCurveTo(-34, -5, -72, -80);
+  X.closePath();
+}
+const OVARY = [232, 48];
+const BUBBLES = (() => { const r = rng(7), a = []; for (let i = 0; i < 70; i++) a.push([lerp(-74, 74, r()), lerp(-84, 72, r()), lerp(2, 5, r()), r() * 6]); return a; })();
+const SPILL = (() => {
+  const r = rng(11), a = [];
+  for (let i = 0; i < 46; i++) {
+    const ang = r() * Math.PI * 2, rad = 30 + r() * 55;
+    a.push({ tx: OVARY[0] + Math.cos(ang) * rad * 1.25, ty: OVARY[1] + Math.sin(ang) * rad * 0.9, d: r() * 0.55, r: 2 + r() * 3.2, ph: r() * 6 });
+  }
+  return a;
+})();
+function foamBubble(x, y, r) {
+  X.beginPath(); X.arc(x, y, r, 0, Math.PI * 2);
+  X.fillStyle = '#fff'; X.fill();
+  X.lineWidth = 1.2; X.strokeStyle = C.foamEdge; X.stroke();
+}
+function crossMark(x, y, k, s) {
+  X.save(); X.translate(x, y); X.scale(k / s, k / s);
+  X.beginPath(); X.arc(0, 0, 14, 0, Math.PI * 2); X.fillStyle = C.bad; X.fill();
+  X.strokeStyle = '#fff'; X.lineWidth = 3.5; X.lineCap = 'round';
+  X.beginPath(); X.moveTo(-6, -6); X.lineTo(6, 6); X.moveTo(6, -6); X.lineTo(-6, 6); X.stroke();
+  X.restore();
+}
+function checkMark(x, y, k, s) {
+  X.save(); X.translate(x, y); X.scale(k / s, k / s);
+  X.beginPath(); X.arc(0, 0, 14, 0, Math.PI * 2); X.fillStyle = C.ok; X.fill();
+  X.strokeStyle = '#fff'; X.lineWidth = 3.5; X.lineCap = 'round'; X.lineJoin = 'round';
+  X.beginPath(); X.moveTo(-6, 0); X.lineTo(-1.5, 5); X.lineTo(7, -5); X.stroke();
+  X.restore();
+}
+
+/**
+ * Dibuja útero, trompas y ovarios.
+ * o.foam = { cav, L, R, spillL, spillR } (0..1), o.block = { L: u, R: u },
+ * o.cath / o.balloon / o.speculum (0..1), o.labels = [{ t, a:[x,y], p:[x,y], alpha }],
+ * o.fert (0..1) animación óvulo–espermatozoide en la trompa derecha, o.marks = { L:'x'|'ok', R:... }.
+ */
+function drawRepro(o) {
+  const { x, y, s = 1, t = 0 } = o;
+  const f = o.foam || {}, blk = o.block || {};
+  X.save();
+  X.translate(x, y); X.scale(s, s);
+
+  // Vagina
+  X.fillStyle = C.vagina;
+  X.beginPath(); X.moveTo(-40, 165); X.lineTo(-62, 250); X.quadraticCurveTo(0, 262, 62, 250); X.lineTo(40, 165); X.closePath(); X.fill();
+  X.fillStyle = 'rgba(158,47,82,0.18)';
+  X.beginPath(); X.moveTo(-10, 175); X.lineTo(-18, 252); X.lineTo(18, 252); X.lineTo(10, 175); X.closePath(); X.fill();
+
+  // Ovarios y ligamentos
+  for (const side of [-1, 1]) {
+    X.strokeStyle = '#E3B39B'; X.lineWidth = 5; X.lineCap = 'round';
+    X.beginPath(); X.moveTo(side * 100, -40); X.quadraticCurveTo(side * 160, 10, side * (OVARY[0] - 38), OVARY[1] - 4); X.stroke();
+    X.save(); X.translate(side * OVARY[0], OVARY[1]); X.rotate(side * -0.25);
+    X.beginPath(); X.ellipse(0, 0, 44, 27, 0, 0, Math.PI * 2);
+    X.fillStyle = C.ovary; X.fill(); X.lineWidth = 2.5; X.strokeStyle = C.ovaryStroke; X.stroke();
+    X.fillStyle = 'rgba(255,245,230,0.9)';
+    for (const [fx, fy, fr] of [[-16, -4, 7], [4, 8, 5], [16, -6, 6], [-2, -10, 4]]) { X.beginPath(); X.arc(fx, fy, fr, 0, Math.PI * 2); X.fill(); }
+    X.restore();
+  }
+
+  // Trompas (pared) y fimbrias
+  for (const side of [-1, 1]) {
+    strokeTube(side, 0, 1, u => tubeW(u) + 7, C.roseDeep);
+    strokeTube(side, 0, 1, u => tubeW(u) + 2, C.rose);
+    const [ex, ey] = tubeAt(1);
+    for (let k = 0; k < 6; k++) {
+      const ang = Math.PI * (0.55 + k * 0.13) + Math.sin(t * 1.5 + k) * 0.05;
+      const len = 22 + (k % 2) * 8;
+      for (const [w, c] of [[6, C.roseDeep], [3, C.rose]]) {
+        X.strokeStyle = c; X.lineWidth = w; X.lineCap = 'round';
+        X.beginPath(); X.moveTo(side * ex, ey);
+        X.quadraticCurveTo(side * (ex + Math.cos(ang) * len * 0.5 + 6), ey + Math.sin(ang) * len * 0.5, side * (ex + Math.cos(ang) * len), ey + Math.sin(ang) * len);
+        X.stroke();
+      }
+    }
+  }
+
+  // Cuerpo uterino
+  bodyPath();
+  const g = X.createRadialGradient(0, -30, 20, 0, 0, 170);
+  g.addColorStop(0, C.roseWall); g.addColorStop(1, C.rose);
+  X.fillStyle = g; X.fill();
+  X.lineWidth = 3; X.strokeStyle = C.roseDeep; X.stroke();
+  cavityPath(); X.fillStyle = C.cavity; X.fill();
+  for (const side of [-1, 1]) strokeTube(side, 0, 1, u => tubeW(u) * 0.38, C.cavity);
+
+  // Espéculo (esquemático)
+  if (o.speculum > 0) {
+    X.save(); X.globalAlpha *= o.speculum;
+    X.strokeStyle = '#7D8B96'; X.lineWidth = 5; X.lineCap = 'round';
+    X.beginPath(); X.moveTo(-30, 290); X.lineTo(-38, 185); X.moveTo(30, 290); X.lineTo(38, 185); X.stroke();
+    X.fillStyle = 'rgba(160,175,186,0.35)';
+    X.beginPath(); X.moveTo(-30, 290); X.lineTo(-38, 185); X.lineTo(38, 185); X.lineTo(30, 290); X.closePath(); X.fill();
+    X.restore();
+  }
+
+  // Catéter con balón
+  if (o.cath > 0) {
+    const tipY = lerp(300, 48, ease(o.cath));
+    X.strokeStyle = '#51606B'; X.lineWidth = 4; X.lineCap = 'round';
+    X.beginPath(); X.moveTo(0, 290); X.lineTo(0, tipY); X.stroke();
+    const b = ease(o.balloon || 0);
+    if (tipY < 200) {
+      X.beginPath(); X.ellipse(0, tipY + 34, lerp(3.5, 10, b), lerp(8, 13, b), 0, 0, Math.PI * 2);
+      X.fillStyle = '#A9D6EC'; X.fill(); X.lineWidth = 1.5; X.strokeStyle = '#4C8DB0'; X.stroke();
+    }
+  }
+
+  // Espuma en la cavidad
+  if (f.cav > 0) {
+    X.save(); cavityPath(); X.clip();
+    const top = 72 - ease(f.cav) * 160;
+    X.fillStyle = 'rgba(255,255,255,0.9)'; X.fillRect(-80, top, 160, 72 - top);
+    for (const [bx, by, br, ph] of BUBBLES) if (by > top + 3) foamBubble(bx + Math.sin(t * 2.5 + ph) * 1.2, by + Math.cos(t * 2 + ph) * 1.2, br);
+    X.restore();
+  }
+
+  // Espuma en trompas, obstrucciones y derrame peritoneal
+  for (const side of [-1, 1]) {
+    const key = side < 0 ? 'L' : 'R';
+    const reach = clamp(f[key] || 0), stop = blk[key] != null ? blk[key] : 1;
+    const eff = Math.min(reach, stop);
+    if (eff > 0) {
+      strokeTube(side, 0, eff, u => tubeW(u) * 0.5, '#FFFFFF');
+      for (let u = 0.02; u < eff; u += 0.028) {
+        const [px, py] = tubeAt(u);
+        const j = Math.sin(t * 3 + u * 40);
+        foamBubble(side * px + j * 0.8, py + j * 0.8, tubeW(u) * 0.24 + 1);
+      }
+    }
+    if (blk[key] != null && reach >= stop) {
+      const [bx, by] = tubeAt(Math.min(1, stop + 0.035));
+      crossMark(side * bx, by - 2, 1 + 0.08 * Math.sin(t * 5), s);
+    }
+    const sp = blk[key] != null ? 0 : clamp(f['spill' + key] || 0);
+    if (sp > 0) {
+      const [ex, ey] = tubeAt(1);
+      for (const b of SPILL) {
+        const k = easeOut((sp - b.d) / (1 - b.d));
+        if (k <= 0) continue;
+        const px = lerp(ex, b.tx, k) + Math.sin(t * 1.7 + b.ph) * 2;
+        const py = lerp(ey, b.ty, k) + Math.cos(t * 1.3 + b.ph) * 2;
+        X.save(); X.globalAlpha *= clamp(k * 3); foamBubble(side * px, py, b.r); X.restore();
+      }
+    }
+    const m = o.marks && o.marks[key];
+    if (m) {
+      const a = clamp(o.marksAlpha == null ? 1 : o.marksAlpha);
+      X.save(); X.globalAlpha *= a;
+      if (m === 'ok') checkMark(side * 250, -150, 1.1, s); else crossMark(side * 250, -150, 1.1, s);
+      X.restore();
+    }
+  }
+
+  // Fecundación: óvulo desde el ovario, espermatozoides desde el útero
+  if (o.fert > 0) {
+    const F = o.fert, meet = 0.62;
+    let ex, ey;
+    if (F < 0.35) { const k = ease(F / 0.35); const [fx, fy] = tubeAt(1); ex = lerp(OVARY[0], fx, k); ey = lerp(OVARY[1] - 20, fy, k); }
+    else { [ex, ey] = tubeAt(lerp(1, meet, ease((F - 0.35) / 0.4))); }
+    if (F > 0.75) {
+      const gk = ease((F - 0.75) / 0.25);
+      X.save(); X.globalAlpha *= gk * (0.6 + 0.4 * Math.sin(t * 5));
+      X.beginPath(); X.arc(ex, ey, 22 + 6 * gk, 0, Math.PI * 2); X.fillStyle = 'rgba(224,165,38,0.35)'; X.fill();
+      X.restore();
+    }
+    X.beginPath(); X.arc(ex, ey, 11, 0, Math.PI * 2); X.fillStyle = 'rgba(255,232,163,0.55)'; X.fill();
+    X.beginPath(); X.arc(ex, ey, 7, 0, Math.PI * 2); X.fillStyle = '#FFE08A'; X.fill(); X.lineWidth = 2; X.strokeStyle = C.gold; X.stroke();
+    for (let i = 0; i < 6; i++) {
+      const k = clamp((F - 0.05 - i * 0.04) / 0.7);
+      if (k <= 0) continue;
+      let sx, sy, dx, dy;
+      if (k < 0.45) {
+        const q = ease(k / 0.45);
+        sx = lerp((i - 2.5) * 6, 70, q); sy = lerp(150, -80, q);
+        dx = 70 - (i - 2.5) * 6; dy = -230;
+      } else {
+        const u = lerp(0, meet - 0.03 - i * 0.012, ease((k - 0.45) / 0.55));
+        [sx, sy] = tubeAt(u);
+        const [nx, ny] = tubeAt(u + 0.01); dx = nx - sx; dy = ny - sy;
+      }
+      const n = Math.hypot(dx, dy) || 1; dx /= n; dy /= n;
+      X.strokeStyle = '#3E5566'; X.lineWidth = 1.3;
+      X.beginPath(); X.moveTo(sx, sy);
+      for (let q = 1; q <= 6; q++) {
+        const wob = Math.sin(t * 18 + q + i) * 2;
+        X.lineTo(sx - dx * q * 3 - dy * wob, sy - dy * q * 3 + dx * wob);
+      }
+      X.stroke();
+      X.beginPath(); X.ellipse(sx, sy, 3.2, 2.2, Math.atan2(dy, dx), 0, Math.PI * 2); X.fillStyle = '#3E5566'; X.fill();
+    }
+  }
+
+  // Rótulos
+  if (o.labels) {
+    for (const L of o.labels) {
+      const a = clamp(L.alpha);
+      if (a <= 0) continue;
+      X.save(); X.globalAlpha *= a;
+      const [ax, ay] = L.a, [lx, ly] = L.p;
+      X.strokeStyle = C.muted; X.lineWidth = 1.5 / s;
+      X.beginPath(); X.moveTo(ax, ay); X.lineTo(lx, ly); X.stroke();
+      X.beginPath(); X.arc(ax, ay, 4 / s, 0, Math.PI * 2); X.fillStyle = C.ink; X.fill();
+      const right = lx < ax;
+      X.font = font(22 / s, 600); X.fillStyle = C.ink; X.textBaseline = 'middle';
+      X.textAlign = right ? 'right' : 'left';
+      X.fillText(L.t, lx + (right ? -8 : 8) / s, ly);
+      X.restore();
+    }
+  }
+  X.restore();
+}
+
+// ── Ecografía simulada ───────────────────────────────────────────────────────
+const NOISE = [1, 2, 3].map(seed => {
+  const c = document.createElement('canvas'); c.width = 300; c.height = 180;
+  const g = c.getContext('2d'), img = g.createImageData(300, 180), r = rng(seed * 97);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 110 + Math.pow(r(), 1.6) * 145;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+});
+function usFan(ax, ay, R, t, reveal, content) {
+  const r = R * easeOut(reveal);
+  if (r < 2) return;
+  const a0 = Math.PI / 2 - Math.PI / 3, a1 = Math.PI / 2 + Math.PI / 3;
+  X.save();
+  X.shadowColor = 'rgba(0,0,0,0.25)'; X.shadowBlur = 24;
+  X.beginPath(); X.moveTo(ax, ay); X.arc(ax, ay, r, a0, a1); X.closePath();
+  X.fillStyle = '#050607'; X.fill();
+  X.shadowColor = 'transparent';
+  X.clip();
+  X.translate(ax, ay);
+  X.fillStyle = '#2a2a2a';
+  X.beginPath(); X.arc(0, 0, R, a0, a1); X.lineTo(0, 0); X.fill();
+  X.filter = 'blur(7px)';
+  content('tissue');
+  X.filter = 'none';
+  X.globalCompositeOperation = 'multiply';
+  X.drawImage(NOISE[Math.floor(t * 10) % 3], -R, 0, R * 2, R * 1.2);
+  X.globalCompositeOperation = 'source-over';
+  content('foam');
+  X.restore();
+  // borde y escala de profundidad
+  X.save();
+  X.strokeStyle = 'rgba(255,255,255,0.25)'; X.lineWidth = 1;
+  X.beginPath(); X.moveTo(ax, ay); X.arc(ax, ay, r, a0, a1); X.closePath(); X.stroke();
+  X.fillStyle = 'rgba(255,255,255,0.55)';
+  for (let d = 60; d < r; d += 60) { X.beginPath(); X.arc(ax + Math.cos(a1) * d - 8, ay + Math.sin(a1) * d, 2, 0, Math.PI * 2); X.fill(); }
+  X.restore();
+}
+function usLabel(s, x, y, a = 1) {
+  if (a <= 0) return;
+  X.save(); X.globalAlpha *= a;
+  const w = textWidth(s, 17, 600) + 18;
+  rrect(x - w / 2, y - 14, w, 28, 14); X.fillStyle = 'rgba(0,0,0,0.6)'; X.fill();
+  X.strokeStyle = 'rgba(255,255,255,0.5)'; X.lineWidth = 1; X.stroke();
+  text(s, x, y + 1, { size: 17, weight: 600, color: '#FFF', align: 'center', base: 'middle' });
+  X.restore();
+}
+function polyUpTo(pts, k) {
+  const L = [0];
+  for (let i = 1; i < pts.length; i++) L.push(L[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const target = L[L.length - 1] * clamp(k);
+  X.beginPath(); X.moveTo(pts[0][0], pts[0][1]);
+  let end = pts[0];
+  for (let i = 1; i < pts.length; i++) {
+    if (L[i] <= target) { X.lineTo(pts[i][0], pts[i][1]); end = pts[i]; continue; }
+    const q = (target - L[i - 1]) / (L[i] - L[i - 1]);
+    end = [lerp(pts[i - 1][0], pts[i][0], q), lerp(pts[i - 1][1], pts[i][1], q)];
+    X.lineTo(end[0], end[1]);
+    break;
+  }
+  return end;
+}
+
+// ── Guion: escenas con narración (subtítulos) y dibujo ───────────────────────
+// Cada línea de narración se muestra como subtítulo; su duración se calcula
+// según la cantidad de palabras (≈ 2,6 palabras/s, ritmo de locución pausado).
+const SCENES = [
+  {
+    id: 'titulo', chapter: 'Inicio',
+    visual: 'Título «HyFoSy» y esquema del útero: la espuma llena la cavidad, recorre ambas trompas y sale alrededor de los ovarios.',
+    lines: [
+      'Bienvenida. En este video le explicaremos qué es la HyFoSy, un examen ginecológico que permite saber si las trompas de Falopio están abiertas.',
+    ],
+    draw(t, d) {
+      const a = ease(seg(t, 0.2, 1.2));
+      text('HyFoSy', 110, 260, { size: 104, weight: 800, color: C.teal, alpha: a });
+      text('Histerosalpingo-sonografía con espuma', 112, 318, { size: 30, weight: 600, alpha: ease(seg(t, 0.7, 1.7)) });
+      X.save(); X.globalAlpha *= ease(seg(t, 1.1, 2.1));
+      para('Un examen para saber si las trompas de Falopio están abiertas (permeables)', 112, 372, 470, { size: 24, color: C.muted });
+      X.restore();
+      const b = ease(seg(t, 1.6, 2.4));
+      X.save(); X.globalAlpha *= b;
+      rrect(112, 470, 300, 40, 20); X.fillStyle = C.tealSoft; X.fill();
+      text('Video instructivo para pacientes', 262, 496, { size: 18, weight: 600, color: C.teal, align: 'center' });
+      X.restore();
+      X.save(); X.globalAlpha *= ease(seg(t, 0.4, 1.6));
+      drawRepro({ x: 960, y: 320, s: 0.62, t,
+        foam: { cav: seg(t, 2, 4), L: seg(t, 3.8, 6.8), R: seg(t, 3.6, 6.6), spillL: seg(t, 6.8, d), spillR: seg(t, 6.6, d) } });
+      X.restore();
+    },
+  },
+  {
+    id: 'que-es', chapter: '¿Qué es?',
+    visual: 'La sigla se descompone en tarjetas: Hystero (útero) · Salpingo (trompas) · Foam (espuma) · Sonography (ecografía). Luego: ecografía + espuma = trompas visibles.',
+    lines: [
+      'HyFoSy, que en la consulta suele pronunciarse «hifosi», es la sigla en inglés de histerosalpingo-sonografía con espuma.',
+      'Es una ecografía transvaginal en la que se introduce una pequeña cantidad de una espuma especial en el útero, para observar cómo pasa a través de las trompas.',
+    ],
+    draw(t, d, L) {
+      title('¿Qué es la HyFoSy?', 640, 130, ease(seg(t, 0, 0.8)), { align: 'center' });
+      const cards = [
+        [[['Hy', 1], ['stero', 0]], 'útero'],
+        [[['Salpingo', 0]], 'trompas'],
+        [[['Fo', 1], ['am', 0]], 'espuma'],
+        [[['S', 1], ['onograph', 0], ['y', 1]], 'ecografía'],
+      ];
+      cards.forEach(([parts, es], i) => {
+        const a = easeOut(seg(t, 0.8 + i * 0.7, 1.5 + i * 0.7));
+        if (a <= 0) return;
+        const x = 105 + i * 275, y = 175 + (1 - a) * 30;
+        card(x, y, 245, 175, { alpha: a });
+        X.save(); X.globalAlpha *= a;
+        const full = parts.map(p => p[0]).join('');
+        let cx = x + 122.5 - textWidth(full, 34, 700) / 2;
+        for (const [s, hl] of parts) {
+          text(s, cx, y + 62, { size: 34, weight: 700, color: hl ? C.teal : '#9AA7B1' });
+          cx += textWidth(s, 34, 700);
+        }
+        text('↓', x + 122.5, y + 105, { size: 24, color: C.muted, align: 'center' });
+        text(es, x + 122.5, y + 148, { size: 28, weight: 600, color: C.roseDeep, align: 'center' });
+        X.restore();
+      });
+      const p = ease(seg(t, L[0] + 4.2, L[0] + 5));
+      X.save(); X.globalAlpha *= p;
+      const pw = 380; rrect(640 - pw / 2, 385, pw, 46, 23); X.fillStyle = C.tealSoft; X.fill();
+      text('Se pronuncia: «hi-fo-si»', 640, 416, { size: 22, weight: 600, color: C.teal, align: 'center' });
+      X.restore();
+      const q = ease(seg(t, L[1] + 0.3, L[1] + 1.3));
+      X.save(); X.globalAlpha *= q;
+      const items = [['🔎', 'Ecografía transvaginal'], ['🫧', 'Espuma en el útero'], ['✅', 'Se ven las trompas']];
+      items.forEach(([e, s], i) => {
+        const k = ease(seg(t, L[1] + 0.3 + i * 1.6, L[1] + 1.1 + i * 1.6));
+        const x = 250 + i * 390;
+        X.save(); X.globalAlpha *= k;
+        emoji(e, x - 90, 500, 34);
+        text(s, x - 60, 508, { size: 22, weight: 600 });
+        if (i < 2) text(i === 0 ? '+' : '=', x + 205, 510, { size: 30, weight: 700, color: C.muted, align: 'center' });
+        X.restore();
+      });
+      X.restore();
+    },
+  },
+  {
+    id: 'anatomia', chapter: 'Anatomía',
+    visual: 'Esquema frontal rotulado (útero, cavidad, cuello, trompa, fimbrias, ovario). El óvulo sale del ovario, entra a la trompa y se encuentra con los espermatozoides. Luego se marca una trompa obstruida.',
+    lines: [
+      'Las trompas de Falopio son dos conductos delgados que conectan el útero con la zona de los ovarios.',
+      'Dentro de la trompa se encuentran el óvulo y el espermatozoide, y por ella el embrión viaja luego hacia el útero.',
+      'Si las trompas están obstruidas, el embarazo natural se dificulta. Por eso, evaluarlas es parte del estudio de fertilidad.',
+    ],
+    draw(t, d, L) {
+      const la = k => ease(seg(t, 0.6 + k * 0.6, 1.2 + k * 0.6)) * (1 - 0.55 * ease(seg(t, L[1], L[1] + 0.8)));
+      const [tx, ty] = tubeAt(0.45);
+      const labels = [
+        { t: 'Útero', a: [-95, -40], p: [-390, -150], alpha: la(0) },
+        { t: 'Cavidad uterina', a: [-25, -30], p: [-390, -60], alpha: la(1) },
+        { t: 'Cuello uterino', a: [-40, 140], p: [-390, 140], alpha: la(2) },
+        { t: 'Trompa de Falopio', a: [tx, ty], p: [390, -170], alpha: la(3) },
+        { t: 'Fimbrias', a: [320, 20], p: [390, -40], alpha: la(4) },
+        { t: 'Ovario', a: [255, 62], p: [390, 110], alpha: la(5) },
+      ];
+      const blk = ease(seg(t, L[2] + 0.8, L[2] + 1.6));
+      drawRepro({ x: 640, y: 335, s: 1, t, labels, fert: seg(t, L[1] + 0.2, L[2] - 0.2),
+        marks: blk > 0 ? { L: 'x' } : null, marksAlpha: blk });
+      if (blk > 0) text('Trompa obstruida', 640 - 250, 335 - 190, { size: 20, weight: 700, color: C.bad, align: 'center', alpha: blk });
+      const fz = ease(seg(t, L[2] - 1.4, L[2] - 0.6)) * (1 - ease(seg(t, L[2] + 0.3, L[2] + 1)));
+      if (fz > 0) { const [mx, my] = tubeAt(0.62); text('Fecundación', 640 + mx, 335 + my - 36, { size: 20, weight: 700, color: C.gold, align: 'center', alpha: fz }); }
+    },
+  },
+  {
+    id: 'indicaciones', chapter: 'Indicaciones',
+    visual: 'Esquema pequeño con signos de interrogación sobre las trompas; a la derecha, lista de indicaciones.',
+    lines: [
+      'La HyFoSy se indica principalmente en el estudio de fertilidad, cuando una pareja tiene dificultad para lograr un embarazo.',
+      'Su resultado ayuda a elegir el tratamiento más adecuado: por ejemplo, relaciones programadas, inseminación intrauterina o fertilización in vitro.',
+    ],
+    draw(t, d, L) {
+      title('¿Para qué se indica?', 100, 125, ease(seg(t, 0, 0.8)));
+      drawRepro({ x: 330, y: 380, s: 0.62, t });
+      for (const side of [-1, 1]) {
+        const [qx, qy] = tubeAt(0.5);
+        const k = ease(seg(t, 0.8, 1.6)) * (0.85 + 0.15 * Math.sin(t * 4 + side));
+        X.save(); X.globalAlpha *= k;
+        X.beginPath(); X.arc(330 + side * qx * 0.62, 380 + qy * 0.62 - 44, 20, 0, Math.PI * 2); X.fillStyle = C.teal; X.fill();
+        text('?', 330 + side * qx * 0.62, 380 + qy * 0.62 - 35, { size: 26, weight: 800, color: '#fff', align: 'center' });
+        X.restore();
+      }
+      let y = 230;
+      y += bullet('👫', 'Estudio de la pareja con dificultad para lograr un embarazo', 650, y, 540, ease(seg(t, L[0] + 0.5, L[0] + 1.3))) + 34;
+      y += bullet('🧭', 'Orientar la elección del tratamiento de fertilidad', 650, y, 540, ease(seg(t, L[1] + 0.2, L[1] + 1))) + 34;
+      bullet('📋', 'Relaciones programadas · inseminación intrauterina · fertilización in vitro (FIV)', 650, y, 540, ease(seg(t, L[1] + 2.5, L[1] + 3.3)), { color: C.muted, size: 22 });
+    },
+  },
+  {
+    id: 'cuando', chapter: '¿Cuándo?',
+    visual: 'Calendario de un ciclo de 28 días: menstruación (días 1–5), ventana del examen (días 6–12, aprox.) y ovulación (≈ día 14). Luego tarjetas con las situaciones en que no debe realizarse.',
+    lines: [
+      'El examen se programa en la primera mitad del ciclo: una vez terminada la menstruación y antes de la ovulación, por lo general entre los días 6 y 12.',
+      'Así se evita realizarlo durante un posible embarazo inicial. No debe hacerse si hay embarazo, una infección pélvica activa o sangrado abundante.',
+    ],
+    draw(t, d, L) {
+      title('¿Cuándo se realiza?', 100, 110, ease(seg(t, 0, 0.8)));
+      const x0 = 136, cw = 36, y0 = 175;
+      for (let i = 0; i < 28; i++) {
+        const day = i + 1, a = easeOut(seg(t, 0.5 + i * 0.05, 0.9 + i * 0.05));
+        if (a <= 0) continue;
+        const inWin = day >= 6 && day <= 12, hl = ease(seg(t, L[0] + 2.5, L[0] + 3.3));
+        let fill = '#E6ECEF', ink = C.muted;
+        if (day <= 5) { fill = '#EFA3AE'; ink = '#7A1F32'; }
+        if (day === 14) { fill = '#F3D38A'; ink = '#6B4B00'; }
+        if (inWin) { fill = hl > 0 ? `rgba(18,122,128,${0.18 + 0.82 * hl})` : '#E6ECEF'; ink = hl > 0.5 ? '#fff' : C.muted; }
+        X.save(); X.globalAlpha *= a;
+        rrect(x0 + i * cw + 2, y0 + (1 - a) * 14, cw - 4, 56, 7); X.fillStyle = fill; X.fill();
+        text(String(day), x0 + i * cw + cw / 2, y0 + 36 + (1 - a) * 14, { size: 17, weight: 700, color: ink, align: 'center' });
+        X.restore();
+      }
+      const lg = ease(seg(t, 1.8, 2.6));
+      text('Menstruación', x0 + 5 * cw / 2, y0 + 88, { size: 18, weight: 600, color: '#A13A52', align: 'center', alpha: lg });
+      text('Ovulación (aprox.)', x0 + 13.5 * cw, y0 + 88, { size: 18, weight: 600, color: '#8A6400', align: 'center', alpha: lg });
+      const hl = ease(seg(t, L[0] + 2.5, L[0] + 3.3));
+      if (hl > 0) {
+        X.save(); X.globalAlpha *= hl;
+        const bx0 = x0 + 5 * cw + 2, bx1 = x0 + 12 * cw - 2;
+        X.strokeStyle = C.teal; X.lineWidth = 3;
+        X.beginPath(); X.moveTo(bx0, y0 - 10); X.lineTo(bx0, y0 - 22); X.lineTo(bx1, y0 - 22); X.lineTo(bx1, y0 - 10); X.stroke();
+        text('Ventana para el examen', (bx0 + bx1) / 2, y0 - 34, { size: 20, weight: 700, color: C.teal, align: 'center' });
+        X.restore();
+      }
+      const na = ease(seg(t, L[1] + 2.4, L[1] + 3.2));
+      text('No debe realizarse si hay:', 136, 355, { size: 26, weight: 700, alpha: na });
+      const items = [['🤰', 'Embarazo o sospecha de embarazo'], ['🦠', 'Infección pélvica activa'], ['🩸', 'Sangrado abundante']];
+      items.forEach(([e, s], i) => {
+        const k = easeOut(seg(t, L[1] + 3 + i * 0.8, L[1] + 3.8 + i * 0.8));
+        if (k <= 0) return;
+        const x = 136 + i * 345, y = 380 + (1 - k) * 20;
+        card(x, y, 320, 110, { alpha: k, stroke: '#F0C4C8' });
+        X.save(); X.globalAlpha *= k;
+        emoji(e, x + 42, y + 55, 34);
+        para(s, x + 80, y + 48, 225, { size: 21, weight: 600 });
+        X.restore();
+      });
+    },
+  },
+  {
+    id: 'preparacion', chapter: 'Preparación',
+    visual: 'Cuatro tarjetas: sin ayuno, analgésico previo si se indica, vejiga vacía e informar al equipo.',
+    lines: [
+      'No requiere ayuno ni anestesia. Su médico puede recomendarle tomar un analgésico, como ibuprofeno, entre treinta y sesenta minutos antes.',
+      'Antes de comenzar, informe si tiene alergias, si podría estar embarazada o si ha tenido fiebre o flujo anormal.',
+    ],
+    draw(t, d, L) {
+      title('Antes del examen', 100, 110, ease(seg(t, 0, 0.8)));
+      const items = [
+        ['🍽️', 'Sin ayuno', 'Puede comer normalmente. No se usa anestesia.', L[0] + 0.3],
+        ['💊', 'Analgésico previo', 'Por ejemplo, ibuprofeno 30–60 min antes, si su médico lo indica.', L[0] + 3.5],
+        ['🚻', 'Vejiga vacía', 'Orine antes de la ecografía transvaginal.', L[1] - 1.2],
+        ['🗣️', 'Informe a su equipo', 'Alergias, posible embarazo, fiebre o flujo anormal.', L[1] + 0.4],
+      ];
+      items.forEach(([e, h, s, at], i) => {
+        const k = easeOut(seg(t, at, at + 0.8));
+        if (k <= 0) return;
+        const x = 100 + (i % 2) * 550, y = 150 + Math.floor(i / 2) * 190 + (1 - k) * 20;
+        card(x, y, 520, 160, { alpha: k });
+        X.save(); X.globalAlpha *= k;
+        rrect(x + 22, y + 30, 76, 76, 38); X.fillStyle = C.tealSoft; X.fill();
+        emoji(e, x + 60, y + 69, 38);
+        text(h, x + 122, y + 58, { size: 26, weight: 700, color: C.teal });
+        para(s, x + 122, y + 92, 370, { size: 21, color: C.muted });
+        X.restore();
+      });
+    },
+  },
+  {
+    id: 'paso1', chapter: 'Paso 1',
+    visual: 'Ecografía simulada (sector): útero con endometrio y ambos ovarios con folículos. A la derecha, qué se revisa.',
+    lines: [
+      'Paso 1. Primero se realiza una ecografía transvaginal para revisar el útero, el endometrio y los ovarios, y descartar hallazgos que obliguen a cambiar el plan.',
+    ],
+    draw(t, d, L) {
+      const rv = seg(t, 0.2, 1.4);
+      usFan(420, 120, 450, t, rv, layer => {
+        if (layer === 'tissue') {
+          X.fillStyle = '#9a9a9a'; X.beginPath(); X.ellipse(0, 235, 150, 92, 0, 0, Math.PI * 2); X.fill();
+          X.fillStyle = '#e8e8e8'; X.beginPath(); X.ellipse(0, 235, 112, 16, 0, 0, Math.PI * 2); X.fill();
+          for (const sd of [-1, 1]) {
+            X.fillStyle = '#7a7a7a'; X.beginPath(); X.ellipse(sd * 185, 350, 62, 42, 0, 0, Math.PI * 2); X.fill();
+            X.fillStyle = '#050505';
+            for (const [fx, fy, fr] of [[-18, -6, 14], [14, 8, 11], [22, -14, 8], [-6, 16, 7]]) { X.beginPath(); X.arc(sd * 185 + fx, 350 + fy, fr, 0, Math.PI * 2); X.fill(); }
+          }
+        } else {
+          X.save(); X.filter = 'blur(3px)'; X.fillStyle = 'rgba(235,235,235,0.75)';
+          X.beginPath(); X.ellipse(0, 235, 105, 11, 0, 0, Math.PI * 2); X.fill(); X.restore();
+        }
+      });
+      const la = ease(seg(t, 1.6, 2.4));
+      usLabel('Útero', 420, 120 + 150, la);
+      usLabel('Endometrio', 420 + 0, 120 + 235 + 36, ease(seg(t, 2.2, 3)));
+      usLabel('Ovario', 420 - 185, 120 + 420, ease(seg(t, 2.8, 3.6)));
+      usLabel('Ovario', 420 + 185, 120 + 420, ease(seg(t, 2.8, 3.6)));
+      const px = 900;
+      text('Paso 1', px, 170, { size: 22, weight: 700, color: C.roseDeep, alpha: ease(seg(t, 0.3, 1)) });
+      X.save(); X.globalAlpha *= ease(seg(t, 0.5, 1.2));
+      para('Ecografía transvaginal inicial', px, 210, 330, { size: 32, weight: 700 });
+      X.restore();
+      let y = 320;
+      y += bullet('🔎', 'Útero y endometrio', px, y, 330, ease(seg(t, 2, 2.8)), { size: 22 }) + 22;
+      y += bullet('🔎', 'Ambos ovarios', px, y, 330, ease(seg(t, 3, 3.8)), { size: 22 }) + 22;
+      bullet('⚠️', 'Descartar hallazgos que cambien el plan', px, y, 330, ease(seg(t, 5.5, 6.3)), { size: 22 });
+    },
+  },
+  {
+    id: 'paso2', chapter: 'Paso 2',
+    visual: 'Esquema: se coloca el espéculo, entra un catéter fino por el cuello hasta la cavidad; el pequeño balón se infla y se retira el espéculo.',
+    lines: [
+      'Paso 2. Con un espéculo, como en un examen de Papanicolaou, se limpia el cuello uterino y se introduce un catéter muy delgado hasta el interior del útero.',
+      'Luego se retira el espéculo y se vuelve a introducir la sonda de ecografía. El catéter queda en su lugar.',
+    ],
+    draw(t, d, L) {
+      const spec = ease(seg(t, 0.4, 1.2)) * (1 - ease(seg(t, L[1] + 0.3, L[1] + 1.3)));
+      const cath = seg(t, L[0] + 3.5, L[0] + 7);
+      const labels = [
+        { t: 'Espéculo', a: [-36, 250], p: [-300, 230], alpha: spec },
+        { t: 'Catéter', a: [0, 200], p: [-300, 150], alpha: ease(seg(t, L[0] + 5, L[0] + 5.8)) },
+        { t: 'Balón', a: [10, 82], p: [-300, 50], alpha: ease(seg(t, L[1] + 1.8, L[1] + 2.6)) },
+      ];
+      drawRepro({ x: 590, y: 320, s: 0.95, t, speculum: spec, cath, balloon: seg(t, L[1] + 1.4, L[1] + 2.4), labels });
+      const px = 960;
+      text('Paso 2', px, 170, { size: 22, weight: 700, color: C.roseDeep, alpha: ease(seg(t, 0.2, 0.9)) });
+      X.save(); X.globalAlpha *= ease(seg(t, 0.4, 1.1));
+      para('Colocación del catéter', px, 210, 290, { size: 32, weight: 700 });
+      X.restore();
+      let y = 320;
+      y += bullet('1️⃣', 'Espéculo (como en el Papanicolaou)', px, y, 290, ease(seg(t, 0.8, 1.6)), { size: 21 }) + 18;
+      y += bullet('2️⃣', 'Limpieza del cuello uterino', px, y, 290, ease(seg(t, L[0] + 2.5, L[0] + 3.3)), { size: 21 }) + 18;
+      y += bullet('3️⃣', 'Catéter fino dentro del útero', px, y, 290, ease(seg(t, L[0] + 4.5, L[0] + 5.3)), { size: 21 }) + 18;
+      bullet('4️⃣', 'Se retira el espéculo', px, y, 290, ease(seg(t, L[1] + 0.3, L[1] + 1.1)), { size: 21 });
+    },
+  },
+  {
+    id: 'paso3', chapter: 'Paso 3',
+    visual: 'La espuma blanca entra por el catéter, llena la cavidad, avanza por ambas trompas y sale alrededor de los ovarios (trompas permeables).',
+    lines: [
+      'Paso 3. A través del catéter se introduce lentamente una espuma especial, elaborada con un gel y agua purificada.',
+      'En la ecografía la espuma se ve de color blanco brillante. El médico observa cómo llena la cavidad del útero y avanza por cada trompa.',
+      'Si la espuma sale por el extremo de la trompa y rodea el ovario, significa que esa trompa está permeable, es decir, abierta.',
+      'Durante este paso puede sentir un cólico parecido al menstrual, que suele ser breve.',
+    ],
+    draw(t, d, L) {
+      const foam = { cav: seg(t, L[0] + 2.5, L[1] + 1), R: seg(t, L[1] + 2, L[2]), L: seg(t, L[1] + 2.6, L[2] + 0.6), spillR: seg(t, L[2] + 0.5, L[3] + 2), spillL: seg(t, L[2] + 1, L[3] + 2.5) };
+      const ok = ease(seg(t, L[2] + 4, L[2] + 4.8));
+      const labels = [
+        { t: 'Espuma', a: [-20, -20], p: [-150, -190], alpha: ease(seg(t, L[1] + 0.5, L[1] + 1.3)) },
+        { t: 'Salida de espuma', a: [-290, 80], p: [-300, 190], alpha: ease(seg(t, L[2] + 2, L[2] + 2.8)) },
+      ];
+      drawRepro({ x: 570, y: 310, s: 0.95, t, cath: 1, balloon: 1, foam, labels, marks: ok > 0 ? { L: 'ok', R: 'ok' } : null, marksAlpha: ok });
+      const px = 960;
+      text('Paso 3', px, 170, { size: 22, weight: 700, color: C.roseDeep, alpha: ease(seg(t, 0.2, 0.9)) });
+      X.save(); X.globalAlpha *= ease(seg(t, 0.4, 1.1));
+      para('Paso de la espuma', px, 210, 290, { size: 32, weight: 700 });
+      X.restore();
+      let y = 280;
+      y += bullet('🫧', 'Espuma de gel y agua purificada', px, y, 290, ease(seg(t, L[0] + 3, L[0] + 3.8)), { size: 21 }) + 16;
+      y += bullet('⚪', 'Se ve blanca en la ecografía', px, y, 290, ease(seg(t, L[1] + 0.3, L[1] + 1.1)), { size: 21 }) + 16;
+      y += bullet('✅', 'Llega al ovario = trompa abierta', px, y, 290, ease(seg(t, L[2] + 2, L[2] + 2.8)), { size: 21 }) + 16;
+      bullet('💬', 'Cólico breve, similar al menstrual', px, y, 290, ease(seg(t, L[3] + 0.3, L[3] + 1.1)), { size: 21 });
+    },
+  },
+  {
+    id: 'paso4', chapter: 'En la pantalla',
+    visual: 'Ecografía simulada: la espuma hiperecogénica (blanca) recorre la trompa derecha y luego la izquierda, y se dispersa alrededor de los ovarios.',
+    lines: [
+      'Así se ve en la pantalla: la espuma es hiperecogénica, es decir, brilla sobre los tejidos, y permite seguir su recorrido en tiempo real.',
+      'Al terminar se retira el catéter. El examen completo suele durar entre 10 y 20 minutos.',
+    ],
+    draw(t, d, L) {
+      const ax = 440, ay = 110, R = 450;
+      const tubeR = [[95, 200], [150, 188], [205, 205], [240, 245], [255, 290], [240, 322]];
+      const tubeL = tubeR.map(([x, y]) => [-x, y]);
+      const smR = catmull(tubeR, 10), smL = catmull(tubeL, 10);
+      const kR = seg(t, 1.2, L[0] + 4), kL = seg(t, L[0] + 3.5, L[1] + 1.5);
+      const sR = seg(t, L[0] + 3.5, L[1] + 3), sL = seg(t, L[1] + 1, L[1] + 4.5);
+      usFan(ax, ay, R, t, seg(t, 0, 1), layer => {
+        if (layer === 'tissue') {
+          X.fillStyle = '#9a9a9a'; X.beginPath(); X.ellipse(0, 215, 120, 85, 0, 0, Math.PI * 2); X.fill();
+          for (const sd of [-1, 1]) {
+            X.fillStyle = '#767676'; X.beginPath(); X.ellipse(sd * 205, 355, 55, 38, 0, 0, Math.PI * 2); X.fill();
+            X.fillStyle = '#060606';
+            for (const [fx, fy, fr] of [[-14, -4, 11], [12, 8, 9], [18, -12, 7]]) { X.beginPath(); X.arc(sd * 205 + fx, 355 + fy, fr, 0, Math.PI * 2); X.fill(); }
+          }
+        } else {
+          X.save();
+          X.shadowColor = 'rgba(255,255,255,0.9)'; X.shadowBlur = 14;
+          X.fillStyle = 'rgba(245,245,245,0.95)';
+          X.beginPath(); X.ellipse(0, 212, 92, 20 + 4 * Math.sin(t * 3), 0, 0, Math.PI * 2); X.fill();
+          X.strokeStyle = '#FFFFFF'; X.lineCap = 'round'; X.lineJoin = 'round';
+          for (const [pts, k] of [[smR, kR], [smL, kL]]) {
+            if (k <= 0) continue;
+            X.lineWidth = 5.5 + Math.sin(t * 9) * 1;
+            polyUpTo(pts, ease(k)); X.stroke();
+          }
+          const r = rng(5);
+          for (const [sd, sp] of [[1, sR], [-1, sL]]) {
+            for (let i = 0; i < 70; i++) {
+              const ang = r() * Math.PI * 2, rad = 20 + r() * 70, dl = r() * 0.5, sz = 1.5 + r() * 3.5;
+              const k = easeOut((sp - dl) / (1 - dl));
+              if (k <= 0) continue;
+              X.globalAlpha = clamp(k * 2) * (0.6 + 0.4 * Math.sin(t * 6 + i));
+              X.fillStyle = '#FFFFFF';
+              X.beginPath(); X.arc(sd * lerp(240, 205 + Math.cos(ang) * rad, k), lerp(322, 355 + Math.sin(ang) * rad * 0.8, k), sz, 0, Math.PI * 2); X.fill();
+            }
+          }
+          X.restore();
+        }
+      });
+      usLabel('Útero', ax, ay + 150, ease(seg(t, 1, 1.8)));
+      usLabel('Espuma en la trompa', ax + 120, ay + 150 - 10, ease(seg(t, L[0] + 2, L[0] + 2.8)) * (1 - ease(seg(t, L[1], L[1] + 0.6))));
+      usLabel('Espuma alrededor del ovario', ax + 150, ay + 440, ease(seg(t, L[0] + 5, L[0] + 5.8)));
+      const px = 910;
+      text('Paso 4', px, 170, { size: 22, weight: 700, color: C.roseDeep, alpha: ease(seg(t, 0.2, 0.9)) });
+      X.save(); X.globalAlpha *= ease(seg(t, 0.4, 1.1));
+      para('Lo que ve el médico', px, 210, 330, { size: 32, weight: 700 });
+      X.restore();
+      let y = 300;
+      y += bullet('⚪', 'Espuma blanca = hiperecogénica', px, y, 330, ease(seg(t, L[0] + 1, L[0] + 1.8)), { size: 21 }) + 18;
+      y += bullet('⏱️', 'Se sigue en tiempo real', px, y, 330, ease(seg(t, L[0] + 4, L[0] + 4.8)), { size: 21 }) + 18;
+      bullet('🕒', 'Duración total: 10 a 20 minutos', px, y, 330, ease(seg(t, L[1] + 1.5, L[1] + 2.3)), { size: 21 });
+    },
+  },
+  {
+    id: 'resultados', chapter: 'Resultados',
+    visual: 'Tres esquemas simultáneos: ambas trompas permeables, una trompa obstruida y ambas obstruidas. Luego, recuadro sobre el espasmo tubárico.',
+    lines: [
+      'El resultado se conoce de inmediato. Puede mostrar ambas trompas permeables, una trompa obstruida o ambas obstruidas.',
+      'A veces, una contracción pasajera de la trompa simula una obstrucción. Si el resultado no es claro, su médico puede indicar otro examen.',
+    ],
+    draw(t, d, L) {
+      title('¿Qué resultados puede tener?', 640, 100, ease(seg(t, 0, 0.8)), { align: 'center', size: 36 });
+      const cases = [
+        ['Ambas trompas permeables', C.ok, {}],
+        ['Una trompa obstruida', C.warn, { L: 0.28 }],
+        ['Ambas trompas obstruidas', C.bad, { L: 0.22, R: 0.22 }],
+      ];
+      const foam = { cav: seg(t, 0.8, 2.3), L: seg(t, 2.1, 4.6), R: seg(t, 2, 4.5), spillL: seg(t, 4.6, 7.5), spillR: seg(t, 4.5, 7.4) };
+      cases.forEach(([s, col, block], i) => {
+        const x = 225 + i * 415, a = ease(seg(t, 0.3 + i * 0.25, 1 + i * 0.25));
+        X.save(); X.globalAlpha *= a;
+        drawRepro({ x, y: 265, s: 0.52, t, cath: 1, balloon: 1, foam, block });
+        const ca = ease(seg(t, L[0] + 2.5 + i * 1.3, L[0] + 3.3 + i * 1.3));
+        X.globalAlpha *= ca;
+        const w = textWidth(s, 20, 700) + 34;
+        rrect(x - w / 2, 385, w, 42, 21); X.fillStyle = col; X.fill();
+        text(s, x, 413, { size: 20, weight: 700, color: '#fff', align: 'center' });
+        X.restore();
+      });
+      const na = easeOut(seg(t, L[1] + 0.3, L[1] + 1.1));
+      if (na > 0) {
+        card(170, 448 + (1 - na) * 16, 940, 100, { alpha: na, fill: '#FFF7E8', stroke: '#F1D29A' });
+        X.save(); X.globalAlpha *= na;
+        emoji('⚠️', 222, 498 + (1 - na) * 16, 34);
+        para('Un espasmo pasajero de la trompa puede simular una obstrucción. Si el resultado no es concluyente, su médico puede indicar otro examen (histerosalpingografía o laparoscopía).', 265, 488 + (1 - na) * 16, 820, { size: 20 });
+        X.restore();
+      }
+    },
+  },
+  {
+    id: 'comparacion', chapter: 'Ventajas',
+    visual: 'Tabla comparativa HyFoSy vs. histerosalpingografía (HSG) y nota de evidencia del ensayo FOAM.',
+    lines: [
+      'Comparada con la histerosalpingografía, que es la radiografía tradicional de las trompas, la HyFoSy no usa rayos X ni medio de contraste yodado, y suele ser menos dolorosa.',
+      'Un gran estudio aleatorizado, el ensayo FOAM, mostró que decidir el tratamiento según la HyFoSy logra tasas de recién nacido vivo comparables a las de la histerosalpingografía.',
+    ],
+    draw(t, d, L) {
+      title('HyFoSy frente a histerosalpingografía (HSG)', 640, 95, ease(seg(t, 0, 0.8)), { align: 'center', size: 34 });
+      const x0 = 150, cols = [390, 300, 300], y0 = 130, rh = 56;
+      const hdr = ease(seg(t, 0.5, 1.2));
+      X.save(); X.globalAlpha *= hdr;
+      rrect(x0 + cols[0], y0, cols[1], rh * 6 + 8, 14); X.fillStyle = C.tealSoft; X.fill();
+      text('HyFoSy', x0 + cols[0] + cols[1] / 2, y0 + 36, { size: 24, weight: 800, color: C.teal, align: 'center' });
+      text('HSG (rayos X)', x0 + cols[0] + cols[1] + cols[2] / 2, y0 + 36, { size: 24, weight: 700, color: C.muted, align: 'center' });
+      X.restore();
+      const rows = [
+        ['Radiación ionizante', 'No', 'Sí'],
+        ['Contraste yodado', 'No', 'Sí'],
+        ['Dolor promedio (0–10)*', '3,0', '5,4'],
+        ['Dónde se realiza', 'Consulta de ecografía', 'Sala de rayos X'],
+        ['Evalúa también los ovarios', 'Sí', 'No'],
+      ];
+      const starts = [L[0] + 2.5, L[0] + 4.5, L[0] + 7, L[1] - 2.2, L[1] - 1];
+      rows.forEach(([c0, c1, c2], i) => {
+        const a = ease(seg(t, starts[i], starts[i] + 0.7));
+        if (a <= 0) return;
+        const y = y0 + rh * (i + 1) + 4;
+        X.save(); X.globalAlpha *= a;
+        X.strokeStyle = C.line; X.lineWidth = 1.5;
+        X.beginPath(); X.moveTo(x0, y); X.lineTo(x0 + 990, y); X.stroke();
+        text(c0, x0 + 8, y + 36, { size: 21, weight: 600 });
+        text(c1, x0 + cols[0] + cols[1] / 2, y + 36, { size: 21, weight: 700, color: C.teal, align: 'center' });
+        text(c2, x0 + cols[0] + cols[1] + cols[2] / 2, y + 36, { size: 21, color: C.muted, align: 'center' });
+        X.restore();
+      });
+      const fa = ease(seg(t, L[1] + 1, L[1] + 2));
+      X.save(); X.globalAlpha *= fa;
+      rrect(150, 500, 990, 76, 12); X.fillStyle = C.bg2; X.fill();
+      para('* Ensayo FOAM (van Welie et al., Hum Reprod 2022; 1.160 mujeres): tasa de recién nacido vivo a 12 meses comparable (46\u00a0% vs. 47\u00a0%) y menos dolor con HyFoSy (EVA 3,0 vs. 5,4).', 170, 530, 950, { size: 17, color: C.muted });
+      X.restore();
+    },
+  },
+  {
+    id: 'despues', chapter: 'Después',
+    visual: 'Tarjetas: actividades normales, molestias esperables y signos de alarma (fiebre, dolor intenso, flujo de mal olor).',
+    lines: [
+      'Después del examen puede retomar sus actividades habituales. Es normal sentir un cólico leve y tener algo de flujo o manchado durante uno o dos días.',
+      'Consulte de inmediato si presenta fiebre, dolor abdominal intenso o flujo de mal olor, porque pueden ser signos de una infección, que es una complicación poco frecuente.',
+    ],
+    draw(t, d, L) {
+      title('Después del examen', 100, 110, ease(seg(t, 0, 0.8)));
+      const items = [
+        ['🙂', 'Actividades habituales el mismo día', null, L[0] + 0.5],
+        ['💧', 'Cólico leve y flujo o manchado por 1–2 días: es esperable', null, L[0] + 3.5],
+        ['🌡️', 'Consulte si tiene fiebre, dolor intenso o flujo de mal olor', C.bad, L[1] + 0.4],
+      ];
+      items.forEach(([e, s, col, at], i) => {
+        const k = easeOut(seg(t, at, at + 0.8));
+        if (k <= 0) return;
+        const y = 150 + i * 125 + (1 - k) * 18;
+        card(150, y, 980, 100, { alpha: k, stroke: col ? '#EBA7AC' : null, fill: col ? '#FFF3F3' : C.card });
+        X.save(); X.globalAlpha *= k;
+        emoji(e, 205, y + 50, 40);
+        text(s, 255, y + 59, { size: 25, weight: col ? 700 : 600, color: col || C.ink });
+        X.restore();
+      });
+    },
+  },
+  {
+    id: 'resumen', chapter: 'Resumen',
+    visual: 'Resumen en tres ideas y aviso: material educativo que no reemplaza la consulta médica.',
+    lines: [
+      'En resumen: la HyFoSy es un examen ambulatorio y sin radiación que, en pocos minutos, muestra si sus trompas están abiertas.',
+      'Si tiene dudas, consulte con su equipo tratante. Gracias por su atención.',
+    ],
+    tail: 2.5,
+    draw(t, d, L) {
+      title('En resumen', 640, 130, ease(seg(t, 0, 0.8)), { align: 'center', color: C.teal, size: 44 });
+      const a = ease(seg(t, 0.6, 1.4));
+      text('Ecografía + espuma  →  ¿trompas abiertas?', 640, 205, { size: 32, weight: 700, align: 'center', alpha: a });
+      const chips = [['🛡️', 'Sin radiación'], ['🏥', 'Ambulatorio, 10–20 min'], ['⚡', 'Resultado inmediato']];
+      chips.forEach(([e, s], i) => {
+        const k = easeOut(seg(t, 1.8 + i * 1.2, 2.6 + i * 1.2));
+        if (k <= 0) return;
+        const x = 150 + i * 340, y = 260 + (1 - k) * 18;
+        card(x, y, 310, 130, { alpha: k });
+        X.save(); X.globalAlpha *= k;
+        emoji(e, x + 155, y + 46, 38);
+        text(s, x + 155, y + 104, { size: 22, weight: 700, align: 'center' });
+        X.restore();
+      });
+      X.save(); X.globalAlpha *= ease(seg(t, L[1], L[1] + 1));
+      para('Material educativo. No reemplaza la evaluación ni las indicaciones de su médico tratante.', 640, 452, 900, { size: 18, color: C.muted, align: 'center' });
+      X.restore();
+    },
+  },
+];
+
+// Tiempos: inicio de escena, inicio de cada subtítulo, duración.
+const LEAD = 0.7, GAP = 0.25;
+let TOTAL = 0;
+for (const sc of SCENES) {
+  sc.start = TOTAL;
+  sc.L = []; sc.segs = [];
+  let lt = LEAD;
+  for (const line of sc.lines) {
+    const words = line.split(/\s+/).length;
+    const dur = Math.max(3, words * 0.38 + 0.8);
+    sc.L.push(lt);
+    sc.segs.push([lt, lt + dur - GAP]);
+    lt += dur;
+  }
+  sc.dur = lt + (sc.tail || 1.2);
+  TOTAL += sc.dur;
+}
+
+// ── Composición de un cuadro ─────────────────────────────────────────────────
+function sceneAt(t) {
+  for (const sc of SCENES) if (t < sc.start + sc.dur) return sc;
+  return SCENES[SCENES.length - 1];
+}
+let showCC = true;
+function renderAt(tg) {
+  tg = clamp(tg, 0, TOTAL - 1e-3);
+  const sc = sceneAt(tg), t = tg - sc.start, d = sc.dur;
+  X.save();
+  const bg = X.createRadialGradient(W * 0.3, H * 0.2, 50, W * 0.5, H * 0.5, W * 0.8);
+  bg.addColorStop(0, '#FFFCF9'); bg.addColorStop(1, C.bg2);
+  X.fillStyle = bg; X.fillRect(0, 0, W, H);
+
+  const fade = Math.min(ease(t / 0.5), ease((d - t) / 0.5));
+  X.save(); X.globalAlpha = fade;
+  sc.draw(t, d, sc.L);
+  X.restore();
+
+  // Encabezado
+  if (sc.id !== 'titulo') {
+    X.save(); X.globalAlpha = fade;
+    const w = textWidth(sc.chapter, 16, 700) + 28;
+    rrect(40, 26, w, 32, 16); X.fillStyle = C.teal; X.fill();
+    text(sc.chapter, 40 + w / 2, 48, { size: 16, weight: 700, color: '#fff', align: 'center' });
+    text('HyFoSy · Guía para pacientes', W - 40, 48, { size: 15, weight: 600, color: C.muted, align: 'right' });
+    X.restore();
+  }
+
+  // Subtítulos
+  if (showCC) {
+    sc.segs.forEach(([a, b], i) => {
+      if (t < a || t > b) return;
+      const al = Math.min(clamp((t - a) / 0.2), clamp((b - t) / 0.2));
+      const lines = wrap(sc.lines[i], 1060, 25, 500);
+      const lh = 34, h = lines.length * lh + 22;
+      const w = Math.max(...lines.map(l => textWidth(l, 25, 500))) + 48;
+      X.save(); X.globalAlpha = al;
+      rrect((W - w) / 2, H - 26 - h, w, h, 12); X.fillStyle = 'rgba(22,30,37,0.86)'; X.fill();
+      lines.forEach((l, k) => text(l, W / 2, H - 26 - h + 36 + k * lh, { size: 25, weight: 500, color: '#FFFFFF', align: 'center' }));
+      X.restore();
+    });
+  }
+
+  // Barra de progreso
+  X.fillStyle = 'rgba(18,122,128,0.25)'; X.fillRect(0, H - 5, W, 5);
+  X.fillStyle = C.teal; X.fillRect(0, H - 5, W * (tg / TOTAL), 5);
+  X.restore();
+}
+
+// API para exportar (scripts/render.mjs)
+window.HYFOSY = {
+  TOTAL,
+  scenes: SCENES.map(s => ({ id: s.id, chapter: s.chapter, visual: s.visual, start: s.start, dur: s.dur,
+    lines: s.lines.map((text, i) => ({ text, start: s.start + s.segs[i][0], end: s.start + s.segs[i][1] })) })),
+  frame(t, q = 0.92) { renderAt(t); return cv.toDataURL('image/jpeg', q); },
+};
+
+// ── Reproductor ──────────────────────────────────────────────────────────────
+if (RENDER) {
+  document.body.classList.add('render');
+  renderAt(0);
+} else {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = W * dpr; cv.height = H * dpr;
+  X.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const $ = id => document.getElementById(id);
+  const playBtn = $('play'), seek = $('seek'), time = $('time'), ccBtn = $('cc');
+  seek.max = TOTAL;
+  let cur = 0, playing = false, last = 0;
+  const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  const chapters = $('chapters');
+  const chapBtns = SCENES.map(sc => {
+    const b = document.createElement('button');
+    b.textContent = sc.chapter;
+    b.onclick = () => { cur = sc.start + 0.01; draw(); };
+    chapters.appendChild(b);
+    return b;
+  });
+  function draw() {
+    renderAt(cur);
+    seek.value = cur;
+    time.textContent = `${fmt(cur)} / ${fmt(TOTAL)}`;
+    const sc = sceneAt(cur);
+    chapBtns.forEach((b, i) => b.classList.toggle('on', SCENES[i] === sc));
+  }
+  function loop(now) {
+    if (!playing) return;
+    cur += (now - last) / 1000; last = now;
+    if (cur >= TOTAL) { cur = TOTAL; setPlaying(false); }
+    draw();
+    requestAnimationFrame(loop);
+  }
+  function setPlaying(p) {
+    playing = p;
+    playBtn.textContent = p ? '❚❚ Pausa' : '▶ Reproducir';
+    if (p) { if (cur >= TOTAL - 0.05) cur = 0; last = performance.now(); requestAnimationFrame(loop); }
+  }
+  playBtn.onclick = () => setPlaying(!playing);
+  seek.oninput = () => { cur = +seek.value; draw(); };
+  ccBtn.onclick = () => { showCC = !showCC; ccBtn.setAttribute('aria-pressed', showCC); draw(); };
+  $('fs').onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.querySelector('.stage').requestFullscreen());
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === 'c' || e.key === 'C') ccBtn.click();
+    else if (e.key === 'f' || e.key === 'F') $('fs').click();
+    else if (e.key === 'ArrowRight') { cur = Math.min(TOTAL, cur + 5); draw(); }
+    else if (e.key === 'ArrowLeft') { cur = Math.max(0, cur - 5); draw(); }
+  });
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(draw);
+  draw();
+}
+</script>
+</body>
+</html>
