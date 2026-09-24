@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HyFoSy · Video instructivo</title>
 <style>
-  :root { --bg:#10181f; --panel:#18232c; --line:#2a3a46; --ink:#e8eef2; --muted:#9fb0bc; --accent:#2bb3b1; }
+  :root { --bg:#1B1420; --panel:#2B1E2E; --line:#42303F; --ink:#F3E9EF; --muted:#BBA1BC; --accent:#B7679C; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font-family:"Segoe UI",Roboto,"Helvetica Neue","Liberation Sans",Arial,sans-serif; }
   main { width:min(1280px,100%); margin:0 auto; padding:16px; }
@@ -50,11 +50,24 @@ const RENDER = new URLSearchParams(location.search).has('render');
 const FONT = '"Segoe UI", Roboto, "Helvetica Neue", "Liberation Sans", Arial, sans-serif';
 const EMOJI = '"Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
 const C = {
-  bg:'#FBF6F2', bg2:'#F3ECE6', ink:'#23303B', muted:'#5C6B77', teal:'#127A80', tealSoft:'#D6EEEE',
-  rose:'#EBA0B2', roseDeep:'#C2476A', roseWall:'#F6C3CF', cavity:'#9E2F52', vagina:'#F2C7C2',
-  ovary:'#F5D2B0', ovaryStroke:'#C98B5C', ok:'#2E8B57', warn:'#D98A12', bad:'#C8323B',
-  foamEdge:'#7FB9DF', gold:'#E0A526', card:'#FFFFFF', line:'#E3D9D2',
+  bg:'#FDF7FB', bg2:'#F5E8F3', ink:'#3A2C42', muted:'#83708F', teal:'#9457A0', tealSoft:'#EFE0F5',
+  rose:'#E8AFCB', roseDeep:'#B14D85', roseWall:'#F3D3E8', cavity:'#7C3568', vagina:'#F1D3E3',
+  ovary:'#F6DCC2', ovaryStroke:'#C98B9E', ok:'#3E9A6D', warn:'#D98A4A', bad:'#C8465F',
+  foamEdge:'#C4A6E8', gold:'#D9A15A', card:'#FFFFFF', line:'#E9DCE7',
 };
+
+// Foto de la Dra. Karina Castillo para la escena de créditos, como data URI
+// (así no depende de un archivo externo y no "mancha" el canvas al exportar).
+// Mientras no se disponga de la foto, DOCTOR_PHOTO queda en null y se dibuja
+// un avatar con sus iniciales en su lugar.
+const DOCTOR_PHOTO = null; // reemplazar por 'data:image/jpeg;base64,...'
+let doctorImg = null;
+const doctorImgReady = DOCTOR_PHOTO ? new Promise(resolve => {
+  const img = new Image();
+  img.onload = () => { doctorImg = img; resolve(); };
+  img.onerror = () => resolve();
+  img.src = DOCTOR_PHOTO;
+}) : Promise.resolve();
 
 const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -630,7 +643,7 @@ const SCENES = [
         let fill = '#E6ECEF', ink = C.muted;
         if (day <= 5) { fill = '#EFA3AE'; ink = '#7A1F32'; }
         if (day === 14) { fill = '#F3D38A'; ink = '#6B4B00'; }
-        if (inWin) { fill = hl > 0 ? `rgba(18,122,128,${0.18 + 0.82 * hl})` : '#E6ECEF'; ink = hl > 0.5 ? '#fff' : C.muted; }
+        if (inWin) { fill = hl > 0 ? `rgba(148,87,160,${0.18 + 0.82 * hl})` : '#E6ECEF'; ink = hl > 0.5 ? '#fff' : C.muted; }
         X.save(); X.globalAlpha *= a;
         rrect(x0 + i * cw + 2, y0 + (1 - a) * 14, cw - 4, 56, 7); X.fillStyle = fill; X.fill();
         text(String(day), x0 + i * cw + cw / 2, y0 + 36 + (1 - a) * 14, { size: 17, weight: 700, color: ink, align: 'center' });
@@ -960,7 +973,7 @@ const SCENES = [
       'En resumen: la HyFoSy es un examen ambulatorio y sin radiación que, en pocos minutos, muestra si sus trompas están abiertas.',
       'Si tiene dudas, consulte con su equipo tratante. Gracias por su atención.',
     ],
-    tail: 2.5,
+    tail: 1.2,
     draw(t, d, L) {
       title('En resumen', 640, 130, ease(seg(t, 0, 0.8)), { align: 'center', color: C.teal, size: 44 });
       const a = ease(seg(t, 0.6, 1.4));
@@ -978,6 +991,67 @@ const SCENES = [
       });
       X.save(); X.globalAlpha *= ease(seg(t, L[1], L[1] + 1));
       para('Material educativo. No reemplaza la evaluación ni las indicaciones de su médico tratante.', 640, 452, 900, { size: 18, color: C.muted, align: 'center' });
+      X.restore();
+    },
+  },
+  {
+    id: 'creditos', chapter: 'Créditos',
+    visual: 'Escena de cierre: fotografía circular de la Dra. Karina Castillo, su nombre, especialidad y su usuario de Instagram.',
+    lines: [
+      'Este material fue producido por la Dra. Karina Castillo, ginecóloga.',
+      'Sígala en Instagram como arroba drkarinacastillogine.',
+    ],
+    tail: 2,
+    draw(t, d, L) {
+      // Fondo con círculos decorativos suaves, en tono violeta/rosa
+      for (const [cx, cy, r, c] of [[1180, 90, 220, C.tealSoft], [70, 650, 260, C.roseWall], [1220, 640, 160, C.tealSoft]]) {
+        X.save(); X.globalAlpha *= 0.55;
+        X.beginPath(); X.arc(cx, cy, r, 0, Math.PI * 2); X.fillStyle = c; X.fill();
+        X.restore();
+      }
+      const pa = easeOut(seg(t, 0.2, 1.1));
+      const cx = 330, cy = 300, R = 148;
+      if (pa > 0) {
+        X.save(); X.globalAlpha *= pa;
+        X.save();
+        X.shadowColor = 'rgba(120,60,100,0.28)'; X.shadowBlur = 34; X.shadowOffsetY = 10;
+        X.beginPath(); X.arc(cx, cy, R + 8, 0, Math.PI * 2); X.fillStyle = '#FFFFFF'; X.fill();
+        X.restore();
+        X.beginPath(); X.arc(cx, cy, R + 8, 0, Math.PI * 2);
+        X.strokeStyle = C.rose; X.lineWidth = 6; X.stroke();
+        X.save();
+        X.beginPath(); X.arc(cx, cy, R, 0, Math.PI * 2); X.clip();
+        if (doctorImg) {
+          const s = Math.max((R * 2) / doctorImg.width, (R * 2) / doctorImg.height);
+          const iw = doctorImg.width * s, ih = doctorImg.height * s;
+          X.drawImage(doctorImg, cx - iw / 2, cy - ih / 2, iw, ih);
+        } else {
+          const g = X.createLinearGradient(cx - R, cy - R, cx + R, cy + R);
+          g.addColorStop(0, C.teal); g.addColorStop(1, C.roseDeep);
+          X.fillStyle = g; X.fillRect(cx - R, cy - R, R * 2, R * 2);
+          text('KC', cx, cy + 2, { size: 92, weight: 800, color: 'rgba(255,255,255,0.92)', align: 'center', base: 'middle' });
+        }
+        X.restore();
+        X.restore();
+      }
+      const na = ease(seg(t, 1, 1.8));
+      X.save(); X.globalAlpha *= na;
+      text('Dra. Karina Castillo', 560, 250, { size: 42, weight: 800, color: C.ink });
+      text('Ginecóloga', 560, 292, { size: 26, weight: 600, color: C.roseDeep });
+      X.restore();
+      const ia = ease(seg(t, L[1] + 0.2, L[1] + 1));
+      if (ia > 0) {
+        X.save(); X.globalAlpha *= ia;
+        const label = '@drkarinacastillogine';
+        const w = textWidth(label, 24, 700) + 76;
+        card(560, 330, w, 56, { r: 28 });
+        emoji('📷', 596, 358, 26);
+        text(label, 624, 366, { size: 24, weight: 700, color: C.teal, base: 'middle' });
+        X.restore();
+      }
+      const fa = ease(seg(t, L[0] + 0.3, L[0] + 1.1));
+      X.save(); X.globalAlpha *= fa;
+      para('Material educativo elaborado para pacientes en estudio de fertilidad.', 560, 420, 560, { size: 19, color: C.muted });
       X.restore();
     },
   },
@@ -1046,7 +1120,7 @@ function renderAt(tg) {
   }
 
   // Barra de progreso
-  X.fillStyle = 'rgba(18,122,128,0.25)'; X.fillRect(0, H - 5, W, 5);
+  X.fillStyle = 'rgba(148,87,160,0.25)'; X.fillRect(0, H - 5, W, 5);
   X.fillStyle = C.teal; X.fillRect(0, H - 5, W * (tg / TOTAL), 5);
   X.restore();
 }
@@ -1057,12 +1131,13 @@ window.HYFOSY = {
   scenes: SCENES.map(s => ({ id: s.id, chapter: s.chapter, visual: s.visual, start: s.start, dur: s.dur,
     lines: s.lines.map((text, i) => ({ text, start: s.start + s.segs[i][0], end: s.start + s.segs[i][1] })) })),
   frame(t, q = 0.92) { renderAt(t); return cv.toDataURL('image/jpeg', q); },
+  ready: doctorImgReady,
 };
 
 // ── Reproductor ──────────────────────────────────────────────────────────────
 if (RENDER) {
   document.body.classList.add('render');
-  renderAt(0);
+  doctorImgReady.then(() => renderAt(0));
 } else {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   cv.width = W * dpr; cv.height = H * dpr;
@@ -1110,7 +1185,7 @@ if (RENDER) {
     else if (e.key === 'ArrowRight') { cur = Math.min(TOTAL, cur + 5); draw(); }
     else if (e.key === 'ArrowLeft') { cur = Math.max(0, cur - 5); draw(); }
   });
-  (document.fonts ? document.fonts.ready : Promise.resolve()).then(draw);
+  Promise.all([document.fonts ? document.fonts.ready : Promise.resolve(), doctorImgReady]).then(draw);
   draw();
 }
 </script>

@@ -105,6 +105,7 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, dev
 page.on('pageerror', e => { console.error('Error en la página:', e); process.exitCode = 1; });
 await page.goto(pathToFileURL(join(ROOT, 'video/hyfosy.html')).href + '?render=1');
 await page.evaluate(() => document.fonts.ready);
+await page.evaluate(() => window.HYFOSY.ready);
 const meta = await page.evaluate(() => ({ TOTAL: window.HYFOSY.TOTAL, scenes: window.HYFOSY.scenes }));
 console.log(`Duración: ${mmss(meta.TOTAL)} · ${meta.scenes.length} escenas`);
 

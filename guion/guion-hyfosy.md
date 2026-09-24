@@ -8,7 +8,7 @@
 | **Título** | HyFoSy: histerosalpingo-sonografía con espuma |
 | **Objetivo** | Que la paciente entienda qué es el examen, para qué sirve, cómo prepararse, qué sentirá y qué hacer después. |
 | **Público** | Pacientes en estudio de fertilidad y sus parejas (lenguaje claro, trato de «usted»). |
-| **Duración** | 4:50 (14 escenas, 630 palabras de narración) |
+| **Duración** | 4:59 (15 escenas, 646 palabras de narración) |
 | **Formato** | 1280 × 720, 30 fps, subtítulos incrustados + archivo .srt para locución o plataformas de video |
 
 ## Escenas
@@ -28,7 +28,8 @@
 | 11 | 3:26–3:45 | Resultados | Tres esquemas simultáneos: ambas trompas permeables, una trompa obstruida y ambas obstruidas. Luego, recuadro sobre el espasmo tubárico. |
 | 12 | 3:45–4:09 | Ventajas | Tabla comparativa HyFoSy vs. histerosalpingografía (HSG) y nota de evidencia del ensayo FOAM. |
 | 13 | 4:09–4:33 | Después | Tarjetas: actividades normales, molestias esperables y signos de alarma (fiebre, dolor intenso, flujo de mal olor). |
-| 14 | 4:33–4:50 | Resumen | Resumen en tres ideas y aviso: material educativo que no reemplaza la consulta médica. |
+| 14 | 4:33–4:49 | Resumen | Resumen en tres ideas y aviso: material educativo que no reemplaza la consulta médica. |
+| 15 | 4:49–4:59 | Créditos | Escena de cierre: fotografía circular de la Dra. Karina Castillo, su nombre, especialidad y su usuario de Instagram. |
 
 ## Narración (locución en off)
 
@@ -130,6 +131,13 @@
 
 - `4:33` En resumen: la HyFoSy es un examen ambulatorio y sin radiación que, en pocos minutos, muestra si sus trompas están abiertas.
 - `4:42` Si tiene dudas, consulte con su equipo tratante. Gracias por su atención.
+
+### 15. Créditos · 4:49
+
+*Visual:* Escena de cierre: fotografía circular de la Dra. Karina Castillo, su nombre, especialidad y su usuario de Instagram.
+
+- `4:49` Este material fue producido por la Dra. Karina Castillo, ginecóloga.
+- `4:54` Sígala en Instagram como arroba drkarinacastillogine.
 
 ## Notas de producción
 
